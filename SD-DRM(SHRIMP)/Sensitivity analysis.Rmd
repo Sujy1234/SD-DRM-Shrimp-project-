@@ -1,0 +1,460 @@
+---
+title: "Sensitivity analysis"
+author: "Sumit Jyoti"
+date: "2026-08-01"
+output:
+  html_document:
+    toc: true
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE
+)
+
+rm(list = ls())
+
+library(ggplot2)
+
+dir.create("results", showWarnings = FALSE)
+dir.create("images", showWarnings = FALSE)
+```
+
+# Read simulation data
+
+```{r read-data}
+main_data <- readRDS(
+  "SD-DRM output for sensitivity analysis.rds"
+)
+```
+
+# Select the overall data
+
+The overall analysis includes all contaminated and uncontaminated simulation iterations.
+
+```{r overall-data}
+overall_data <- main_data
+```
+
+# Select the contaminated-event data
+
+The conditional analysis includes only iterations in which the retail bacterial concentration was greater than zero.
+
+```{r contaminated-data}
+contaminated_data <- main_data[
+  main_data$C_retail > 0,
+]
+```
+
+# Analysis sample sizes
+
+```{r sample-sizes}
+sample_sizes <- data.frame(
+  Analysis = c(
+    "Overall",
+    "Contaminated exposure events"
+  ),
+  Number_of_iterations = c(
+    nrow(overall_data),
+    nrow(contaminated_data)
+  )
+)
+
+print(sample_sizes)
+```
+
+# Spearman sensitivity analysis
+
+```{r spearman-function}
+calculate_spearman <- function(
+  data,
+  input_variables,
+  outcome_variable,
+  scenario_name,
+  analysis_name
+) {
+  
+  data.frame(
+    Analysis = analysis_name,
+    Scenario = scenario_name,
+    Parameter = input_variables,
+    
+    Spearman_coefficient = sapply(
+      input_variables,
+      function(input_name) {
+        cor(
+          data[[input_name]],
+          data[[outcome_variable]],
+          method = "spearman"
+        )
+      }
+    ),
+    
+    N = nrow(data),
+    row.names = NULL
+  )
+}
+```
+
+# Run the sensitivity analysis
+
+```{r run-analysis}
+run_sensitivity_analysis <- function(
+  data,
+  analysis_name
+) {
+  
+  rbind(
+    
+    calculate_spearman(
+      data = data,
+      
+      input_variables = c(
+        "C_retail",
+        "M",
+        "F_pathogenic",
+        "fr",
+        "pMIC",
+        "Emax",
+        "EC50"
+      ),
+      
+      outcome_variable = "risk_raw",
+      scenario_name = "Raw shrimp consumption",
+      analysis_name = analysis_name
+    ),
+    
+    calculate_spearman(
+      data = data,
+      
+      input_variables = c(
+        "C_retail",
+        "M",
+        "F_pathogenic",
+        "R_under",
+        "fr",
+        "pMIC",
+        "Emax",
+        "EC50"
+      ),
+      
+      outcome_variable = "risk_undercooked",
+      scenario_name = "Undercooked shrimp consumption",
+      analysis_name = analysis_name
+    ),
+    
+    calculate_spearman(
+      data = data,
+      
+      input_variables = c(
+        "C_retail",
+        "M_h",
+        "F_pathogenic",
+        "T_shrimp_hand",
+        "T_hand_food",
+        "fr",
+        "pMIC",
+        "Emax",
+        "EC50"
+      ),
+      
+      outcome_variable = "risk_hand",
+      scenario_name = "Hand-mediated cross-contamination",
+      analysis_name = analysis_name
+    )
+  )
+}
+
+overall_results <- run_sensitivity_analysis(
+  data = overall_data,
+  analysis_name = "Overall"
+)
+
+contaminated_results <- run_sensitivity_analysis(
+  data = contaminated_data,
+  analysis_name = "Contaminated exposure events"
+)
+
+spearman_results <- rbind(
+  overall_results,
+  contaminated_results
+)
+```
+
+# Add parameter labels
+
+```{r parameter-labels}
+parameter_labels <- c(
+  C_retail = "Retail concentration",
+  M = "Shrimp consumption amount",
+  M_h = "Raw shrimp mass handled",
+  F_pathogenic = "Pathogenic fraction",
+  R_under = "Cooking log reduction",
+  T_shrimp_hand = "Shrimp-to-hand transfer",
+  T_hand_food = "Hand-to-food transfer",
+  fr = "Resistant fraction",
+  pMIC = "Doxycycline concentration (%MIC)",
+  Emax = "Maximum killing effect (Emax)",
+  EC50 = "Half-maximal concentration (EC50)"
+)
+
+spearman_results$Parameter_label <- unname(
+  parameter_labels[
+    spearman_results$Parameter
+  ]
+)
+
+spearman_results$Absolute_coefficient <- abs(
+  spearman_results$Spearman_coefficient
+)
+
+scenario_order <- c(
+  "Raw shrimp consumption",
+  "Undercooked shrimp consumption",
+  "Hand-mediated cross-contamination"
+)
+
+analysis_order <- c(
+  "Overall",
+  "Contaminated exposure events"
+)
+
+spearman_results$Scenario <- factor(
+  spearman_results$Scenario,
+  levels = scenario_order
+)
+
+spearman_results$Analysis <- factor(
+  spearman_results$Analysis,
+  levels = analysis_order
+)
+```
+
+# Create a common parameter order
+
+The same parameter order is used in the overall and contaminated-event columns.
+
+```{r parameter-order}
+spearman_results$Parameter_plot <- paste(
+  spearman_results$Scenario,
+  spearman_results$Parameter_label,
+  sep = "___"
+)
+
+ordering_data <- aggregate(
+  Absolute_coefficient ~ Scenario + Parameter_plot,
+  data = spearman_results,
+  FUN = mean
+)
+
+parameter_levels <- unlist(
+  lapply(
+    scenario_order,
+    function(current_scenario) {
+      
+      scenario_data <- ordering_data[
+        as.character(ordering_data$Scenario) ==
+          current_scenario,
+      ]
+      
+      scenario_data$Parameter_plot[
+        order(
+          scenario_data$Absolute_coefficient
+        )
+      ]
+    }
+  ),
+  use.names = FALSE
+)
+
+spearman_results$Parameter_plot <- factor(
+  spearman_results$Parameter_plot,
+  levels = parameter_levels
+)
+
+print(spearman_results)
+```
+
+# Save results
+
+```{r save-results}
+write.csv(
+  spearman_results,
+  file.path(
+    "results",
+    "spearman_sensitivity_results.csv"
+  ),
+  row.names = FALSE
+)
+```
+
+# Two-panel sensitivity figure
+
+The parameter labels are shown once on the left and are shared by both analysis columns.
+
+```{r sensitivity-figure}
+bar_colour <- "#7895B2"
+
+analysis_labels <- c(
+  "Overall" = paste0(
+    "A. Overall analysis\n(n = ",
+    format(
+      nrow(overall_data),
+      big.mark = ","
+    ),
+    ")"
+  ),
+  
+  "Contaminated exposure events" = paste0(
+    "B. Contaminated exposure events\n(n = ",
+    format(
+      nrow(contaminated_data),
+      big.mark = ","
+    ),
+    ")"
+  )
+)
+
+combined_sensitivity_plot <- ggplot(
+  spearman_results,
+  aes(
+    x = Spearman_coefficient,
+    y = Parameter_plot
+  )
+) +
+  geom_col(
+    fill = bar_colour,
+    colour = "black",
+    linewidth = 0.35,
+    width = 0.72
+  ) +
+  geom_vline(
+    xintercept = 0,
+    linetype = "dashed",
+    linewidth = 0.45
+  ) +
+  geom_text(
+    aes(
+      label = sprintf(
+        "%.2f",
+        Spearman_coefficient
+      ),
+      
+      hjust = ifelse(
+        Spearman_coefficient >= 0,
+        -0.15,
+        1.15
+      )
+    ),
+    size = 3
+  ) +
+  facet_grid(
+    rows = vars(Scenario),
+    cols = vars(Analysis),
+    scales = "free_y",
+    space = "free_y",
+    
+    labeller = labeller(
+      Analysis = analysis_labels
+    )
+  ) +
+  scale_y_discrete(
+    labels = function(x) {
+      sub(
+        "^.*___",
+        "",
+        x
+      )
+    }
+  ) +
+  scale_x_continuous(
+    breaks = seq(
+      -1,
+      1,
+      by = 0.25
+    )
+  ) +
+  coord_cartesian(
+    xlim = c(
+      -1.08,
+      1.08
+    ),
+    clip = "off"
+  ) +
+  labs(
+    x = "Spearman rank correlation coefficient",
+    y = "Model input"
+  ) +
+  theme_bw(
+    base_size = 11
+  ) +
+  theme(
+    strip.background = element_rect(
+      fill = "grey90",
+      colour = "grey35"
+    ),
+    
+    strip.text.x = element_text(
+      face = "bold",
+      size = 11
+    ),
+    
+    strip.text.y = element_text(
+      face = "bold",
+      size = 10
+    ),
+    
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    
+    axis.title = element_text(
+      size = 11
+    ),
+    
+    axis.text = element_text(
+      size = 9
+    ),
+    
+    panel.spacing.x = grid::unit(
+      0.8,
+      "lines"
+    ),
+    
+    panel.spacing.y = grid::unit(
+      0.6,
+      "lines"
+    ),
+    
+    plot.margin = margin(
+      8,
+      18,
+      8,
+      8
+    )
+  )
+
+print(combined_sensitivity_plot)
+
+ggsave(
+  filename = file.path(
+    "images",
+    "spearman_sensitivity_two_panel.png"
+  ),
+  plot = combined_sensitivity_plot,
+  width = 13,
+  height = 9,
+  dpi = 300,
+  bg = "white"
+)
+```
+
+# Output files
+
+```text
+results/spearman_sensitivity_results.csv
+
+images/spearman_sensitivity_two_panel.png
+```
