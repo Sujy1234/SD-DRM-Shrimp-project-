@@ -1,0 +1,2 @@
+"Antibiotic","Emax_per_day","Emax_LCL_per_day","Emax_UCL_per_day","EC50_ug_mL","EC50_LCL_ug_mL","EC50_UCL_ug_mL","Successful_bootstrap_runs"
+"Doxycycline",71.6657823541474,58.6188048188582,85.856189336028,0.164375658130166,0.0749738124123464,0.304536579448852,1000
