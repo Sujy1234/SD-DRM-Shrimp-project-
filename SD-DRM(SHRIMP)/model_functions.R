@@ -10,22 +10,21 @@ log1mexpm <- function(a) {
 }
 
 
-# Estimate susceptible dose-response parameters under treatment
+# Recycle scalar inputs to the required length
 
-get_ab_beta <- function(alpha, beta, C, Emax, EC50, tfs,
-                        seed = 0, nsim = 10000) {
-  
-  if (C == 0) return(c(alpha_s = alpha, beta_s = beta))
-  
-  set.seed(seed)
-  
-  r <- stats::rbeta(nsim, alpha, beta)
-  mu <- -log1mexpm(r) / tfs
-  mu_s <- mu + Emax * C / (EC50 + C)
-  r_s <- -log1mexpm(mu_s * tfs)
-  
-  r_s <- r_s[is.finite(r_s)]
-  r_s <- pmin(pmax(r_s, 1e-12), 1 - 1e-12)
+recycle_input <- function(x, n, name) {
+  if (!(length(x) %in% c(1, n))) {
+    stop(paste0(name, " must have length 1 or ", n, "."))
+  }
+  rep_len(x, n)
+}
+
+
+# Fit susceptible dose-response parameters for one PD effect
+
+fit_ab_effect <- function(mu, effect, tfs) {
+  r_s <- -log1mexpm((mu + effect) * tfs)
+  r_s <- pmin(pmax(r_s[is.finite(r_s)], 1e-12), 1 - 1e-12)
   
   fit <- fitdistrplus::fitdist(r_s, "beta", method = "mle")
   
@@ -36,24 +35,161 @@ get_ab_beta <- function(alpha, beta, C, Emax, EC50, tfs,
 }
 
 
+# Estimate susceptible parameters for one Emax-EC50 combination
+
+get_ab_beta <- function(alpha, beta, C, Emax, EC50, tfs,
+                        seed = 0, nsim = 10000) {
+  
+  if (length(C) != 1 || length(Emax) != 1 || length(EC50) != 1) {
+    stop("C, Emax, and EC50 must each contain one value.")
+  }
+  
+  if (C == 0) return(c(alpha_s = alpha, beta_s = beta))
+  
+  set.seed(seed)
+  
+  r <- stats::rbeta(nsim, alpha, beta)
+  mu <- -log1mexpm(r) / tfs
+  effect <- Emax * C / (EC50 + C)
+  
+  fit_ab_effect(mu, effect, tfs)
+}
+
+
+# Create lookup table for paired pharmacodynamic parameters
+
+make_ab_lookup <- function(alpha, beta, Emax, EC50, C_max, tfs,
+                           n_grid = 250, seed = 0, nsim = 10000) {
+  
+  if (length(Emax) != length(EC50)) {
+    stop("Emax and EC50 must be paired vectors of equal length.")
+  }
+  
+  if (any(!is.finite(Emax)) || any(!is.finite(EC50)) ||
+      any(Emax < 0) || any(EC50 <= 0)) {
+    stop("Invalid Emax or EC50 values.")
+  }
+  
+  set.seed(seed)
+  
+  r <- stats::rbeta(nsim, alpha, beta)
+  mu <- -log1mexpm(r) / tfs
+  
+  effect_max <- 1.001 * max(Emax * C_max / (EC50 + C_max))
+  
+  if (effect_max <= 0) {
+    return(data.frame(effect = 0, alpha_s = alpha, beta_s = beta))
+  }
+  
+  effect_grid <- c(
+    0,
+    exp(seq(
+      log(effect_max * 1e-6),
+      log(effect_max),
+      length.out = n_grid - 1
+    ))
+  )
+  
+  pars <- t(vapply(
+    effect_grid[-1],
+    function(x) fit_ab_effect(mu, x, tfs),
+    numeric(2)
+  ))
+  
+  data.frame(
+    effect = effect_grid,
+    alpha_s = c(alpha, pars[, "alpha_s"]),
+    beta_s = c(beta, pars[, "beta_s"])
+  )
+}
+
+
+# Interpolate susceptible dose-response parameters
+
+get_ab_from_lookup <- function(effect, ab_lookup) {
+  
+  upper_limit <- max(ab_lookup$effect)
+  
+  if (max(effect) > upper_limit * (1 + 1e-10)) {
+    stop("The pharmacodynamic effect exceeds the lookup-table range.")
+  }
+  
+  effect <- pmin(pmax(effect, 0), upper_limit)
+  
+  data.frame(
+    alpha_s = exp(approx(
+      ab_lookup$effect,
+      log(ab_lookup$alpha_s),
+      xout = effect,
+      rule = 2
+    )$y),
+    
+    beta_s = exp(approx(
+      ab_lookup$effect,
+      log(ab_lookup$beta_s),
+      xout = effect,
+      rule = 2
+    )$y)
+  )
+}
+
+
 # Calculate SD-DRM infection risk per consumption event
 
 calc_sd_drm <- function(dose, fr, C, alpha, beta,
-                        Emax, EC50, tfs) {
+                        Emax, EC50, tfs, ab_lookup = NULL) {
   
-  if (any(!is.finite(dose))) stop("dose contains non-finite values.")
-  if (any(dose < 0)) stop("dose must be greater than or equal to zero.")
+  n <- max(
+    length(dose), length(fr), length(C),
+    length(Emax), length(EC50)
+  )
   
-  if (length(fr) != 1 || !is.finite(fr) || fr < 0 || fr > 1) {
-    stop("fr must be a single value between 0 and 1.")
+  dose <- recycle_input(dose, n, "dose")
+  fr <- recycle_input(fr, n, "fr")
+  C <- recycle_input(C, n, "C")
+  Emax <- recycle_input(Emax, n, "Emax")
+  EC50 <- recycle_input(EC50, n, "EC50")
+  
+  if (any(!is.finite(dose)) || any(dose < 0)) {
+    stop("dose must contain finite values greater than or equal to zero.")
   }
   
-  pars <- get_ab_beta(alpha, beta, C, Emax, EC50, tfs)
+  if (any(!is.finite(fr)) || any(fr < 0 | fr > 1)) {
+    stop("fr must contain values between 0 and 1.")
+  }
+  
+  if (any(!is.finite(C)) || any(C < 0) ||
+      any(!is.finite(Emax)) || any(Emax < 0) ||
+      any(!is.finite(EC50)) || any(EC50 <= 0)) {
+    stop("Invalid C, Emax, or EC50 values.")
+  }
+  
+  effect <- ifelse(C == 0, 0, Emax * C / (EC50 + C))
+  
+  if (is.null(ab_lookup)) {
+    
+    if (any(effect != effect[1])) {
+      stop("ab_lookup is required when the PD effect varies between rows.")
+    }
+    
+    pars <- get_ab_beta(
+      alpha, beta, C[1], Emax[1], EC50[1], tfs
+    )
+    
+    alpha_s <- rep(unname(pars["alpha_s"]), n)
+    beta_s <- rep(unname(pars["beta_s"]), n)
+    
+  } else {
+    
+    pars <- get_ab_from_lookup(effect, ab_lookup)
+    alpha_s <- pars$alpha_s
+    beta_s <- pars$beta_s
+  }
   
   Ns <- dose * (1 - fr)
   Nr <- dose * fr
   
-  p_ext_s <- (1 + Ns / pars["beta_s"])^(-pars["alpha_s"])
+  p_ext_s <- (1 + Ns / beta_s)^(-alpha_s)
   p_ext_r <- (1 + Nr / beta)^(-alpha)
   
   risk_total <- 1 - p_ext_s * p_ext_r
@@ -61,14 +197,17 @@ calc_sd_drm <- function(dose, fr, C, alpha, beta,
   risk_more_treatable <- p_ext_r * (1 - p_ext_s)
   
   data.frame(
-    risk_total = risk_total,
-    risk_less_treatable = risk_less_treatable,
-    risk_more_treatable = risk_more_treatable,
+    risk_total = pmin(pmax(risk_total, 0), 1),
+    risk_less_treatable = pmin(pmax(risk_less_treatable, 0), 1),
+    risk_more_treatable = pmin(pmax(risk_more_treatable, 0), 1),
+    PD_effect = effect,
+    
     status = ifelse(
       risk_less_treatable >= risk_more_treatable,
       "Less likely treatable",
       "More likely treatable"
     ),
+    
     stringsAsFactors = FALSE
   )
 }
@@ -196,11 +335,13 @@ summarize_annual_risk <- function(annual_data,
     P25_annual_risk = unname(stats::quantile(x, 0.25)),
     P75_annual_risk = unname(stats::quantile(x, 0.75)),
     P97.5_annual_risk = unname(stats::quantile(x, 0.975)),
+    
     mean_consumption_days = if ("K_j" %in% names(annual_data)) {
       mean(annual_data$K_j)
     } else {
       NA_real_
     },
+    
     stringsAsFactors = FALSE
   )
 }

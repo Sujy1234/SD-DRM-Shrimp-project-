@@ -44,19 +44,12 @@ pd_parameters <- read.csv(
 )
 
 scenario_list <- list(
-  "Raw shrimp consumption" =
-    dose_data$D_raw,
-  
-  "Undercooked shrimp consumption" =
-    dose_data$D_under,
-  
-  "Hand-mediated cross-contamination" =
-    dose_data$D_hand
+  "Raw shrimp consumption" = dose_data$D_raw,
+  "Undercooked shrimp consumption" = dose_data$D_under,
+  "Hand-mediated cross-contamination" = dose_data$D_hand
 )
 
-scenario_levels <- names(
-  scenario_list
-)
+scenario_levels <- names(scenario_list)
 ```
 
 # SD-DRM parameters
@@ -76,42 +69,13 @@ days_per_year <- 365
 fr_fixed <- 0.20
 pMIC_fixed <- 2
 
-pMIC_seq <- seq(
-  0,
-  10,
-  by = 0.1
-)
+pMIC_seq <- seq(0, 10, by = 0.1)
+pMIC_plot <- c(0, 1, 2, 5)
+pMIC_breaks <- seq(0, 10, by = 1)
 
-pMIC_plot <- c(
-  0,
-  1,
-  2,
-  5
-)
-
-pMIC_breaks <- seq(
-  0,
-  10,
-  by = 1
-)
-
-fr_seq <- seq(
-  0,
-  0.5,
-  by = 0.05
-)
-
-fr_plot <- c(
-  0,
-  0.2,
-  0.5
-)
-
-fr_breaks <- seq(
-  0,
-  0.5,
-  by = 0.05
-)
+fr_seq <- seq(0, 0.5, by = 0.05)
+fr_plot <- c(0, 0.2, 0.5)
+fr_breaks <- seq(0, 0.5, by = 0.05)
 ```
 
 # Draw paired Emax and EC50 values
@@ -120,158 +84,86 @@ fr_breaks <- seq(
 set.seed(annual_seed + 1)
 
 pd_id <- sample(
-  seq_len(
-    nrow(pd_parameters)
-  ),
+  seq_len(nrow(pd_parameters)),
   size = nrow(dose_data),
   replace = TRUE
 )
 
-Emax_mc <- pd_parameters$Emax_per_day[
-  pd_id
-]
-
-EC50_mc <- pd_parameters$EC50_ug_mL[
-  pd_id
-]
+Emax_mc <- pd_parameters$Emax_per_day[pd_id]
+EC50_mc <- pd_parameters$EC50_ug_mL[pd_id]
 ```
 
 Sampling the row index ensures that each \(E_{\max}\) value remains paired with the \(EC_{50}\) value obtained from the same bootstrap run.
 
+# Create susceptible-parameter lookup table
+
+```{r create-lookup}
+ab_lookup <- make_ab_lookup(
+  alpha = alpha,
+  beta = beta,
+  Emax = pd_parameters$Emax_per_day,
+  EC50 = pd_parameters$EC50_ug_mL,
+  C_max = max(pMIC_seq) / 100 * MIC,
+  tfs = tfs,
+  seed = annual_seed + 3
+)
+```
+
 # Save sensitivity-analysis simulation data
 
-The sensitivity dataset contains the original exposure inputs, variable SD-DRM inputs, paired pharmacodynamic parameters, and the corresponding event-level infection risks.
+The sensitivity dataset contains the original exposure inputs, variable SD-DRM inputs, paired pharmacodynamic parameters, the calculated pharmacodynamic effect, and the corresponding event-level infection risks.
 
 ```{r save-sensitivity-data}
 set.seed(annual_seed + 2)
 
-n_sensitivity <- nrow(
-  dose_data
-)
+n_sensitivity <- nrow(dose_data)
 
 fr_sensitivity <- runif(
-  n = n_sensitivity,
-  min = min(fr_seq),
-  max = max(fr_seq)
+  n_sensitivity,
+  min(fr_seq),
+  max(fr_seq)
 )
 
 pMIC_sensitivity <- sample(
   pMIC_seq,
-  size = n_sensitivity,
+  n_sensitivity,
   replace = TRUE
 )
 
-C_sensitivity <- (
-  pMIC_sensitivity / 100
-) * MIC
+C_sensitivity <- pMIC_sensitivity / 100 * MIC
 
-alpha_s_sensitivity <- numeric(
-  n_sensitivity
-)
-
-beta_s_sensitivity <- numeric(
-  n_sensitivity
-)
-
-for (pm in unique(pMIC_sensitivity)) {
-  
-  index <- which(
-    pMIC_sensitivity == pm
-  )
-  
-  susceptible_parameters <- get_ab_beta(
+calc_sensitivity_risk <- function(dose) {
+  calc_sd_drm(
+    dose = dose,
+    fr = fr_sensitivity,
+    C = C_sensitivity,
     alpha = alpha,
     beta = beta,
-    C = (pm / 100) * MIC,
-    Emax = Emax_mc[index],
-    EC50 = EC50_mc[index],
-    tfs = tfs
-  )
-  
-  alpha_s_sensitivity[index] <- unname(
-    susceptible_parameters[["alpha_s"]]
-  )
-  
-  beta_s_sensitivity[index] <- unname(
-    susceptible_parameters[["beta_s"]]
+    Emax = Emax_mc,
+    EC50 = EC50_mc,
+    tfs = tfs,
+    ab_lookup = ab_lookup
   )
 }
 
-calculate_sensitivity_risk <- function(dose) {
-  
-  susceptible_dose <- dose * (
-    1 - fr_sensitivity
-  )
-  
-  resistant_dose <- dose *
-    fr_sensitivity
-  
-  p_ext_s <- (
-    1 +
-      susceptible_dose /
-      beta_s_sensitivity
-  )^(
-    -alpha_s_sensitivity
-  )
-  
-  p_ext_r <- (
-    1 +
-      resistant_dose /
-      beta
-  )^(
-    -alpha
-  )
-  
-  pmin(
-    pmax(
-      1 - p_ext_s * p_ext_r,
-      0
-    ),
-    1
-  )
-}
+sensitivity_raw <- calc_sensitivity_risk(dose_data$D_raw)
+sensitivity_under <- calc_sensitivity_risk(dose_data$D_under)
+sensitivity_hand <- calc_sensitivity_risk(dose_data$D_hand)
 
 sensitivity_data <- cbind(
-  simulation_id =
-    seq_len(n_sensitivity),
-  
+  simulation_id = seq_len(n_sensitivity),
   dose_data,
-  
-  pd_id =
-    pd_id,
-  
-  Bootstrap_run =
-    pd_parameters$Bootstrap_run[pd_id],
-  
-  Emax =
-    Emax_mc,
-  
-  EC50 =
-    EC50_mc,
-  
-  fr =
-    fr_sensitivity,
-  
-  pMIC =
-    pMIC_sensitivity,
-  
-  C_doxycycline =
-    C_sensitivity,
-  
-  risk_raw =
-    calculate_sensitivity_risk(
-      dose_data$D_raw
-    ),
-  
-  risk_undercooked =
-    calculate_sensitivity_risk(
-      dose_data$D_under
-    ),
-  
-  risk_hand =
-    calculate_sensitivity_risk(
-      dose_data$D_hand
-    )
+  pd_id = pd_id,
+  Bootstrap_run = pd_parameters$Bootstrap_run[pd_id],
+  Emax = Emax_mc,
+  EC50 = EC50_mc,
+  fr = fr_sensitivity,
+  pMIC = pMIC_sensitivity,
+  C_doxycycline = C_sensitivity,
+  PD_effect = sensitivity_raw$PD_effect,
+  risk_raw = sensitivity_raw$risk_total,
+  risk_undercooked = sensitivity_under$risk_total,
+  risk_hand = sensitivity_hand$risk_total
 )
 
 saveRDS(
@@ -281,96 +173,56 @@ saveRDS(
 )
 
 rm(
-  alpha_s_sensitivity,
-  beta_s_sensitivity,
   C_sensitivity,
   fr_sensitivity,
   pMIC_sensitivity,
-  sensitivity_data
+  sensitivity_raw,
+  sensitivity_under,
+  sensitivity_hand,
+  sensitivity_data,
+  calc_sensitivity_risk
 )
 ```
 
 # Empirical parameter functions
 
 ```{r empirical-functions}
-annualise_risk <- function(
-  p,
-  K_j
-) {
+annualise_risk <- function(p, K_j) {
   
-  K_distribution <- prop.table(
-    table(K_j)
-  )
+  K_distribution <- prop.table(table(K_j))
+  K_values <- as.numeric(names(K_distribution))
+  K_weights <- as.numeric(K_distribution)
   
-  K_values <- as.numeric(
-    names(K_distribution)
-  )
-  
-  K_weights <- as.numeric(
-    K_distribution
-  )
-  
-  p <- pmin(
-    pmax(p, 0),
-    1
-  )
-  
-  annual_risk <- numeric(
-    length(p)
-  )
+  p <- pmin(pmax(p, 0), 1)
+  annual_risk <- numeric(length(p))
   
   for (i in seq_along(K_values)) {
-    
     annual_risk <- annual_risk +
-      K_weights[i] *
-      (
-        1 -
-          (1 - p)^K_values[i]
-      )
+      K_weights[i] * (1 - (1 - p)^K_values[i])
   }
   
   annual_risk
 }
 
-calc_empirical_curve <- function(
-  dose,
-  fr,
-  C,
-  K_j
-) {
+calc_empirical_curve <- function(dose, fr, C, K_j) {
   
   n_dose <- length(dose)
   n_pd <- nrow(pd_parameters)
   
   out <- calc_sd_drm(
-    dose = rep(
-      dose,
-      each = n_pd
-    ),
-    
+    dose = rep(dose, each = n_pd),
     fr = fr,
     C = C,
     alpha = alpha,
     beta = beta,
-    
-    Emax = rep(
-      pd_parameters$Emax_per_day,
-      times = n_dose
-    ),
-    
-    EC50 = rep(
-      pd_parameters$EC50_ug_mL,
-      times = n_dose
-    ),
-    
-    tfs = tfs
+    Emax = rep(pd_parameters$Emax_per_day, times = n_dose),
+    EC50 = rep(pd_parameters$EC50_ug_mL, times = n_dose),
+    tfs = tfs,
+    ab_lookup = ab_lookup
   )
   
   annual_risk_matrix <- matrix(
-    annualise_risk(
-      out$risk_total,
-      K_j
-    ),
+    annualise_risk(out$risk_total, K_j),
     nrow = n_pd
   )
   
@@ -380,21 +232,13 @@ calc_empirical_curve <- function(
   )
   
   list(
-    mean_annual_risk =
-      colMeans(annual_risk_matrix),
+    mean_annual_risk = colMeans(annual_risk_matrix),
     
-    status =
-      apply(
-        status_matrix,
-        2,
-        function(x) {
-          names(
-            which.max(
-              table(x)
-            )
-          )
-        }
-      )
+    status = apply(
+      status_matrix,
+      2,
+      function(x) names(which.max(table(x)))
+    )
   )
 }
 ```
@@ -419,10 +263,7 @@ make_annual_dose_response_data <- function(
     consumption_se
   )
   
-  F_j <- pmin(
-    pmax(F_j, 0),
-    1
-  )
+  F_j <- pmin(pmax(F_j, 0), 1)
   
   K_j <- rbinom(
     n_person_years_curve,
@@ -439,17 +280,12 @@ make_annual_dose_response_data <- function(
         dose_vector <- scenario_list[[scn]]
         
         positive_dose <- dose_vector[
-          dose_vector > 0 &
-            is.finite(dose_vector)
+          dose_vector > 0 & is.finite(dose_vector)
         ]
         
         dose_grid <- 10^seq(
-          log10(
-            min(positive_dose)
-          ),
-          log10(
-            max(positive_dose)
-          ),
+          log10(min(positive_dose)),
+          log10(max(positive_dose)),
           length.out = 300
         )
         
@@ -459,28 +295,13 @@ make_annual_dose_response_data <- function(
             values,
             function(v) {
               
-              fr_use <- if (
-                vary_by == "fr"
-              ) {
-                v
-              } else {
-                fixed_fr
-              }
-              
-              pMIC_use <- if (
-                vary_by == "pMIC"
-              ) {
-                v
-              } else {
-                fixed_pMIC
-              }
+              fr_use <- if (vary_by == "fr") v else fixed_fr
+              pMIC_use <- if (vary_by == "pMIC") v else fixed_pMIC
               
               out <- calc_empirical_curve(
                 dose = dose_grid,
                 fr = fr_use,
-                C = (
-                  pMIC_use / 100
-                ) * MIC,
+                C = pMIC_use / 100 * MIC,
                 K_j = K_j
               )
               
@@ -489,25 +310,14 @@ make_annual_dose_response_data <- function(
                 dose = dose_grid,
                 value = v,
                 
-                group = if (
-                  vary_by == "pMIC"
-                ) {
-                  paste0(
-                    v,
-                    "% MIC"
-                  )
+                group = if (vary_by == "pMIC") {
+                  paste0(v, "% MIC")
                 } else {
-                  paste0(
-                    "fr = ",
-                    v
-                  )
+                  paste0("fr = ", v)
                 },
                 
-                mean_annual_risk =
-                  out$mean_annual_risk,
-                
-                status =
-                  out$status
+                mean_annual_risk = out$mean_annual_risk,
+                status = out$status
               )
             }
           )
@@ -539,62 +349,32 @@ summarise_scenario_annual_risk <- function(
             values,
             function(v) {
               
-              fr_use <- if (
-                vary_by == "fr"
-              ) {
-                v
-              } else {
-                fixed_fr
-              }
-              
-              pMIC_use <- if (
-                vary_by == "pMIC"
-              ) {
-                v
-              } else {
-                fixed_pMIC
-              }
+              fr_use <- if (vary_by == "fr") v else fixed_fr
+              pMIC_use <- if (vary_by == "pMIC") v else fixed_pMIC
               
               event_risk <- calc_sd_drm(
                 dose = dose_vector,
                 fr = fr_use,
-                C = (
-                  pMIC_use / 100
-                ) * MIC,
+                C = pMIC_use / 100 * MIC,
                 alpha = alpha,
                 beta = beta,
                 Emax = Emax_mc,
                 EC50 = EC50_mc,
-                tfs = tfs
+                tfs = tfs,
+                ab_lookup = ab_lookup
               )
               
               annual_data <- simulate_annual_risk(
-                daily_risk =
-                  event_risk$risk_total,
-                
-                n_person_years =
-                  n_person_years,
-                
-                consumption_mean =
-                  consumption_mean,
-                
-                consumption_se =
-                  consumption_se,
-                
-                days_per_year =
-                  days_per_year,
-                
-                seed =
-                  seed
+                daily_risk = event_risk$risk_total,
+                n_person_years = n_person_years,
+                consumption_mean = consumption_mean,
+                consumption_se = consumption_se,
+                days_per_year = days_per_year,
+                seed = seed
               )
               
-              annual_risk <-
-                annual_data$annual_risk
-              
-              positive_annual_risk <-
-                annual_risk[
-                  annual_risk > 0
-                ]
+              annual_risk <- annual_data$annual_risk
+              positive_annual_risk <- annual_risk[annual_risk > 0]
               
               conditional_quantiles <- quantile(
                 positive_annual_risk,
@@ -623,9 +403,7 @@ summarise_scenario_annual_risk <- function(
                 value = v,
                 
                 probability_zero_annual_risk =
-                  mean(
-                    annual_risk == 0
-                  ),
+                  mean(annual_risk == 0),
                 
                 mean_annual_risk =
                   mean(annual_risk),
@@ -655,8 +433,7 @@ summarise_scenario_annual_risk <- function(
                   mean(annual_data$K_j),
                 
                 outcome = ifelse(
-                  mean_less_risk >=
-                    mean_more_risk,
+                  mean_less_risk >= mean_more_risk,
                   "Less likely treatable",
                   "More likely treatable"
                 )
@@ -684,12 +461,7 @@ prepare_annual_summary <- function(data) {
     )
   )
   
-  data[
-    order(
-      data$Scenario,
-      data$value
-    ),
-  ]
+  data[order(data$Scenario, data$value), ]
 }
 
 make_log10_annual_summary <- function(
@@ -698,66 +470,40 @@ make_log10_annual_summary <- function(
 ) {
   
   result <- data.frame(
-    Scenario =
-      as.character(data$Scenario),
-    
-    value =
-      data$value,
-    
+    Scenario = as.character(data$Scenario),
+    value = data$value,
     probability_zero_annual_risk =
       data$probability_zero_annual_risk,
-    
     mean_consumption_days =
       data$mean_consumption_days,
-    
-    outcome =
-      as.character(data$outcome),
+    outcome = as.character(data$outcome),
     
     log10_mean_annual_risk =
-      safe_log10(
-        data$mean_annual_risk
-      ),
+      safe_log10(data$mean_annual_risk),
     
     log10_p025_positive_annual_risk =
-      safe_log10(
-        data$p025_positive_annual_risk
-      ),
+      safe_log10(data$p025_positive_annual_risk),
     
     log10_p125_positive_annual_risk =
-      safe_log10(
-        data$p125_positive_annual_risk
-      ),
+      safe_log10(data$p125_positive_annual_risk),
     
     log10_p25_positive_annual_risk =
-      safe_log10(
-        data$p25_positive_annual_risk
-      ),
+      safe_log10(data$p25_positive_annual_risk),
     
     log10_median_positive_annual_risk =
-      safe_log10(
-        data$median_positive_annual_risk
-      ),
+      safe_log10(data$median_positive_annual_risk),
     
     log10_p75_positive_annual_risk =
-      safe_log10(
-        data$p75_positive_annual_risk
-      ),
+      safe_log10(data$p75_positive_annual_risk),
     
     log10_p875_positive_annual_risk =
-      safe_log10(
-        data$p875_positive_annual_risk
-      ),
+      safe_log10(data$p875_positive_annual_risk),
     
     log10_p975_positive_annual_risk =
-      safe_log10(
-        data$p975_positive_annual_risk
-      )
+      safe_log10(data$p975_positive_annual_risk)
   )
   
-  names(result)[
-    names(result) == "value"
-  ] <- parameter_name
-  
+  names(result)[names(result) == "value"] <- parameter_name
   result
 }
 
@@ -767,55 +513,33 @@ make_conditional_median_plot_data <- function(
 ) {
   
   result <- data.frame(
-    Scenario =
-      as.character(data$Scenario),
-    
-    value =
-      data$value,
-    
-    outcome =
-      as.character(data$outcome),
+    Scenario = as.character(data$Scenario),
+    value = data$value,
+    outcome = as.character(data$outcome),
     
     log10_median_annual_risk =
-      safe_log10(
-        data$median_positive_annual_risk
-      ),
+      safe_log10(data$median_positive_annual_risk),
     
     log10_p025_annual_risk =
-      safe_log10(
-        data$p025_positive_annual_risk
-      ),
+      safe_log10(data$p025_positive_annual_risk),
     
     log10_p125_annual_risk =
-      safe_log10(
-        data$p125_positive_annual_risk
-      ),
+      safe_log10(data$p125_positive_annual_risk),
     
     log10_p25_annual_risk =
-      safe_log10(
-        data$p25_positive_annual_risk
-      ),
+      safe_log10(data$p25_positive_annual_risk),
     
     log10_p75_annual_risk =
-      safe_log10(
-        data$p75_positive_annual_risk
-      ),
+      safe_log10(data$p75_positive_annual_risk),
     
     log10_p875_annual_risk =
-      safe_log10(
-        data$p875_positive_annual_risk
-      ),
+      safe_log10(data$p875_positive_annual_risk),
     
     log10_p975_annual_risk =
-      safe_log10(
-        data$p975_positive_annual_risk
-      )
+      safe_log10(data$p975_positive_annual_risk)
   )
   
-  names(result)[
-    names(result) == "value"
-  ] <- parameter_name
-  
+  names(result)[names(result) == "value"] <- parameter_name
   result
 }
 
@@ -831,10 +555,7 @@ save_annual_outputs <- function(
       data,
       parameter_name
     ),
-    file.path(
-      "results",
-      summary_file
-    ),
+    file.path("results", summary_file),
     row.names = FALSE
   )
   
@@ -843,10 +564,7 @@ save_annual_outputs <- function(
       data,
       parameter_name
     ),
-    file.path(
-      "results",
-      plot_data_file
-    ),
+    file.path("results", plot_data_file),
     row.names = FALSE
   )
 }
@@ -858,40 +576,21 @@ make_selected_annual_summary <- function(
   selected_condition
 ) {
   
-  x <- subset(
-    data,
-    value == selected_value
-  )
+  x <- subset(data, value == selected_value)
   
   data.frame(
-    Scenario_exploration =
-      scenario_exploration,
-    
-    Selected_condition =
-      selected_condition,
-    
-    Exposure_scenario =
-      as.character(x$Scenario),
+    Scenario_exploration = scenario_exploration,
+    Selected_condition = selected_condition,
+    Exposure_scenario = as.character(x$Scenario),
     
     Probability_zero_annual_risk =
-      round(
-        x$probability_zero_annual_risk,
-        4
-      ),
+      round(x$probability_zero_annual_risk, 4),
     
     Mean_consumption_days =
-      round(
-        x$mean_consumption_days,
-        2
-      ),
+      round(x$mean_consumption_days, 2),
     
     log10_mean_annual_risk =
-      round(
-        safe_log10(
-          x$mean_annual_risk
-        ),
-        3
-      ),
+      round(safe_log10(x$mean_annual_risk), 3),
     
     Dominant_outcome =
       as.character(x$outcome)
@@ -918,10 +617,8 @@ annual_risk_summary_pMIC <-
 save_annual_outputs(
   data = annual_risk_summary_pMIC,
   parameter_name = "pMIC",
-  
   summary_file =
     "annual_risk_summary_varying_pMIC.csv",
-  
   plot_data_file = paste0(
     "conditional_median_annual_risk_",
     "plot_data_varying_pMIC.csv"
