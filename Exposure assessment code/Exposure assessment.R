@@ -1,308 +1,222 @@
-# Risk assessment using Monte Carlo simulation
+# Exposure assessment
 
-# Libraries
+library(mc2d)
 library(ggplot2)
-library(dplyr)
-library(tidyr)
-library(triangle)
+library(patchwork)
 
-# Set seed
 set.seed(123)
 
-# Number of simulations
-n_sim <- 100000
+# Simulation settings
+n_inner <- 1000
+n_outer <- 500
 
+ndvar(n_inner)
+ndunc(n_outer)
 
-# Common inputs
+# Input values
+B_min <- 75
+B_max <- 1100
 
-# Uncertain prevalence of V. parahaemolyticus-positive shrimp
-# Based on 10 positive and 75 negative samples
-# Beta(1,1) prior gives Beta(11,76) posterior
+M_shape <- 0.8760928
+M_scale <- 43.276368
 
-P_pos <- rbeta(
-  n = n_sim,
-  shape1 = 11,
-  shape2 = 76
+F_min <- 0.0018
+F_max <- 0.0233
+
+# Input variability
+B_retail_v <- mcstoc(runif, type = "V", min = B_min, max = B_max)
+M_v <- mcstoc(rgamma, type = "V", shape = M_shape, scale = M_scale)
+F_pathogenic_v <- mcstoc(runif, type = "V", min = F_min, max = F_max)
+
+# Daily pathogenic dose
+D_raw_v <- B_retail_v * M_v * F_pathogenic_v
+
+# Model summary
+exposure_model <- mc(B_retail_v, M_v, F_pathogenic_v, D_raw_v)
+
+print(exposure_model)
+print(summary(exposure_model, probs = c(0.025, 0.50, 0.975)))
+
+# Extract variability simulations
+simulation_data <- data.frame(
+  inner_id = seq_len(n_inner),
+  B_retail = as.vector(unmc(B_retail_v, drop = TRUE)),
+  M = as.vector(unmc(M_v, drop = TRUE)),
+  F_pathogenic = as.vector(unmc(F_pathogenic_v, drop = TRUE)),
+  D_raw = as.vector(unmc(D_raw_v, drop = TRUE))
 )
 
-# Indicator of whether each simulated shrimp sample is positive
+# Add dose on the log10 scale
+simulation_data$Log10_D_raw <- log10(simulation_data$D_raw)
 
-I_pos <- rbinom(
-  n = n_sim,
-  size = 1,
-  prob = P_pos
-)
-
-# Concentration among positive shrimp samples
-# LogUniform(75,1100) MPN/g
-
-C_pos <- exp(
-  runif(
-    n = n_sim,
-    min = log(75),
-    max = log(1100)
-  )
-)
-
-# Unconditional retail concentration
-# Zero for negative samples
-
-C_retail <- I_pos * C_pos
-
-# Daily shrimp consumption among shrimp consumers
-# Arithmetic-scale mean = 36.38 g/day
-# Estimated arithmetic-scale SD = 87.2 g/day
-# Corresponding natural-log parameters:
-# meanlog = 2.6396
-# sdlog = 1.3816
-
-M <- rlnorm(
-  n = n_sim,
-  meanlog = 2.6396,
-  sdlog = 1.3816
-)
-
-# Raw shrimp mass handled
-# Assumes that 13% of the initial mass is inedible or discarded
-
-M_h <- M / (1 - 0.13)
-
-# Pathogenic fraction
-
-F_pathogenic <- runif(
-  n = n_sim,
-  min = 0.002,
-  max = 0.02
-)
-
-
-# Scenario 1: Raw shrimp consumption
-
-D_raw <- C_retail *
-  M *
-  F_pathogenic
-
-
-# Scenario 2: Undercooked shrimp consumption
-
-# Log10 reduction due to partial or insufficient cooking
-
-R_under <- runif(
-  n = n_sim,
-  min = 0.7,
-  max = 2.5
-)
-
-# Proportion remaining after cooking
-
-Remaining_after_cooking <- 10^(-R_under)
-
-# Pathogenic dose from undercooked shrimp
-
-D_under <- C_retail *
-  M *
-  Remaining_after_cooking *
-  F_pathogenic
-
-
-# Scenario 3: Hand-mediated cross-contamination
-
-# Shrimp-to-hand transfer
-# X1 is modelled on the log10 percentage scale
-
-X1 <- rlogis(
-  n = n_sim,
-  location = 1.59,
-  scale = 0.14
-)
-
-T_shrimp_hand <- 10^X1 / 100
-
-# Transfer fraction cannot exceed 1
-
-T_shrimp_hand <- pmin(T_shrimp_hand, 1)
-
-# Hand-to-food transfer
-# X2 is modelled on the log10 percentage scale
-
-X2 <- rtriangle(
-  n = n_sim,
-  a = -1.61,
-  b = 1.32,
-  c = 0.12
-)
-
-T_hand_food <- 10^X2 / 100
-
-# Transfer fraction cannot exceed 1
-
-T_hand_food <- pmin(T_hand_food, 1)
-
-# Pathogenic dose transferred through contaminated hands
-
-D_hand <- C_retail *
-  M_h *
-  T_shrimp_hand *
-  T_hand_food *
-  F_pathogenic
-
-
-# Save full Monte Carlo simulation data
-
-full_simulation_data <- data.frame(
-  sim_id = seq_len(n_sim),
-  P_pos = P_pos,
-  I_pos = I_pos,
-  C_pos = C_pos,
-  C_retail = C_retail,
-  M = M,
-  M_h = M_h,
-  F_pathogenic = F_pathogenic,
-  R_under = R_under,
-  Remaining_after_cooking = Remaining_after_cooking,
-  X1_shrimp_hand = X1,
-  T_shrimp_hand = T_shrimp_hand,
-  X2_hand_food = X2,
-  T_hand_food = T_hand_food,
-  D_raw = D_raw,
-  D_under = D_under,
-  D_hand = D_hand
-)
-
+# Save simulation values
 write.csv(
-  full_simulation_data,
-  file = "full_simulation_data_three_scenarios.csv",
+  simulation_data,
+  "raw_shrimp_mc2d_simulation_data.csv",
   row.names = FALSE
 )
 
+# Descriptive summary
+summarise_parameter <- function(x) {
+  percentiles <- quantile(
+    x,
+    probs = c(0.025, 0.25, 0.50, 0.75, 0.975),
+    na.rm = TRUE,
+    names = FALSE
+  )
+  
+  data.frame(
+    Mean = mean(x, na.rm = TRUE),
+    P2.5 = percentiles[1],
+    P25 = percentiles[2],
+    Median = percentiles[3],
+    P75 = percentiles[4],
+    P97.5 = percentiles[5],
+    Minimum = min(x, na.rm = TRUE),
+    Maximum = max(x, na.rm = TRUE)
+  )
+}
 
-# Prepare dose data
-
-dose_data <- data.frame(
-  Raw_shrimp = D_raw,
-  Undercooked_shrimp = D_under,
-  Hand_cross_contamination = D_hand
+parameter_labels <- c(
+  B_retail = "Retail concentration (MPN/g)",
+  M = "Serving mass (g/shrimp-consumption day)",
+  F_pathogenic = "Pathogenic fraction (proportion)",
+  D_raw = "Pathogenic dose (MPN/shrimp-consumption day)",
+  Log10_D_raw = "Log10 pathogenic dose [log10(MPN/shrimp-consumption day)]"
 )
 
-dose_long <- dose_data %>%
-  pivot_longer(
-    cols = everything(),
-    names_to = "Scenario",
-    values_to = "Dose"
-  ) %>%
-  mutate(
-    Scenario = recode(
-      Scenario,
-      Raw_shrimp = "Raw shrimp consumption",
-      Undercooked_shrimp = "Undercooked shrimp consumption",
-      Hand_cross_contamination =
-        "Hand-mediated cross-contamination"
-    ),
-    Scenario = factor(
-      Scenario,
-      levels = c(
-        "Raw shrimp consumption",
-        "Undercooked shrimp consumption",
-        "Hand-mediated cross-contamination"
-      )
-    )
+parameter_summary <- do.call(
+  rbind,
+  lapply(names(parameter_labels), function(parameter) {
+    result <- summarise_parameter(simulation_data[[parameter]])
+    result$Parameter <- parameter_labels[[parameter]]
+    result
+  })
+)
+
+parameter_summary <- parameter_summary[
+  ,
+  c("Parameter", "Mean", "P2.5", "P25", "Median",
+    "P75", "P97.5", "Minimum", "Maximum")
+]
+
+rownames(parameter_summary) <- NULL
+
+print(parameter_summary)
+
+write.csv(
+  parameter_summary,
+  "raw_shrimp_input_parameter_summary.csv",
+  row.names = FALSE
+)
+
+# Plotting data
+plot_data <- data.frame(Log10_dose = simulation_data$Log10_D_raw)
+
+q_dose <- quantile(
+  plot_data$Log10_dose,
+  probs = c(0.025, 0.50, 0.975),
+  na.rm = TRUE
+)
+
+p2.5_log10_dose <- unname(q_dose[1])
+median_log10_dose <- unname(q_dose[2])
+p97.5_log10_dose <- unname(q_dose[3])
+
+plot_style <- theme_classic(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", size = 12),
+    plot.tag = element_text(face = "bold", size = 12)
   )
 
-
-# Summarise unconditional dose distributions
-
-dose_summary <- dose_long %>%
-  group_by(Scenario) %>%
-  summarise(
-    Probability_zero = mean(Dose == 0),
-    Mean_dose = mean(Dose),
-    Median_dose = median(Dose),
-    P2.5 = quantile(Dose, 0.025),
-    P25 = quantile(Dose, 0.25),
-    P75 = quantile(Dose, 0.75),
-    P97.5 = quantile(Dose, 0.975),
-    Maximum = max(Dose),
-    .groups = "drop"
-  )
-
-print(dose_summary)
-
-
-# Summarise positive-dose simulations only
-
-positive_dose_summary <- dose_long %>%
-  filter(Dose > 0) %>%
-  group_by(Scenario) %>%
-  summarise(
-    Mean_positive_dose = mean(Dose),
-    Median_positive_dose = median(Dose),
-    P2.5_positive = quantile(Dose, 0.025),
-    P25_positive = quantile(Dose, 0.25),
-    P75_positive = quantile(Dose, 0.75),
-    P97.5_positive = quantile(Dose, 0.975),
-    .groups = "drop"
-  )
-
-print(positive_dose_summary)
-
-
-# Plot positive dose distributions
-
-# Zero doses cannot be displayed on a log10 scale.
-# The histogram therefore displays positive doses only.
-
-dose_plot_data <- dose_long %>%
-  filter(Dose > 0) %>%
-  mutate(
-    Log10_dose = log10(Dose)
-  )
-
-dose_histogram <- ggplot(
-  data = dose_plot_data,
-  aes(x = Log10_dose)
-) +
+# Histogram
+dose_plot <- ggplot(plot_data, aes(x = Log10_dose)) +
+  annotate(
+    "rect",
+    xmin = p2.5_log10_dose,
+    xmax = p97.5_log10_dose,
+    ymin = -Inf, ymax = Inf,
+    fill = "#BBD1E3",
+    alpha = 0.9
+  ) +
   geom_histogram(
     binwidth = 0.10,
     boundary = 0,
     colour = "black",
-    fill = "grey70"
+    fill = "#7898B0",
+    alpha = 0.65
   ) +
-  facet_wrap(
-    ~ Scenario,
-    ncol = 1,
-    scales = "free_y"
+  geom_vline(
+    xintercept = c(p2.5_log10_dose, p97.5_log10_dose),
+    linetype = "dashed",
+    colour = "#2C5D8A",
+    linewidth = 0.8
+  ) +
+  geom_vline(
+    xintercept = median_log10_dose,
+    colour = "black",
+    linewidth = 0.9
   ) +
   labs(
-    x = expression(
-      Log[10] *
-        " pathogenic dose among positive exposures (MPN/day)"
-    ),
+    x = expression(Log[10] * " pathogenic dose (MPN per shrimp-consumption day)"),
     y = "Frequency"
   ) +
-  theme_classic(base_size = 13) +
-  theme(
-    strip.background = element_rect(
-      fill = "white",
-      colour = "black"
-    ),
-    strip.text = element_text(
-      size = 12,
-      face = "bold"
-    ),
-    axis.title = element_text(size = 13),
-    axis.text = element_text(size = 11)
-  )
+  plot_style
 
-print(dose_histogram)
+# Cumulative distribution function
+cdf_plot <- ggplot(plot_data, aes(x = Log10_dose)) +
+  stat_ecdf(
+    geom = "step",
+    linewidth = 0.9,
+    colour = "black"
+  ) +
+  annotate(
+    "segment",
+    x = -Inf, xend = median_log10_dose,
+    y = 0.5, yend = 0.5,
+    linetype = "dashed",
+    colour = "grey40",
+    linewidth = 0.6
+  ) +
+  annotate(
+    "segment",
+    x = median_log10_dose, xend = median_log10_dose,
+    y = 0, yend = 0.5,
+    linetype = "dashed",
+    colour = "grey40",
+    linewidth = 0.6
+  ) +
+  annotate(
+    "label",
+    x = median_log10_dose + 0.10,
+    y = 0.47,
+    label = paste0("Median = ", round(median_log10_dose, 3)),
+    hjust = 0,
+    size = 3.5
+  ) +
+  scale_y_continuous(
+    labels = scales::percent,
+    breaks = seq(0, 1, 0.2),
+    limits = c(0, 1),
+    expand = expansion(mult = c(0, 0.05))
+  ) +
+  labs(
+    x = expression(Log[10] * " pathogenic dose (MPN per shrimp-consumption day)"),
+    y = "Cumulative probability"
+  ) +
+  plot_style
+# Combine figures
+combined_dose_plot <- dose_plot + cdf_plot +
+  plot_layout(ncol = 2) +
+  plot_annotation(tag_levels = "A")
 
-
-# Save histogram
+print(combined_dose_plot)
 
 ggsave(
-  filename = "dose_distribution_all_scenarios_updated.png",
-  plot = dose_histogram,
-  width = 7,
-  height = 7,
-  units = "in",
-  dpi = 600
+  "dose_variability_histogram_cdf_mc2d.png",
+  combined_dose_plot,
+  width = 12,
+  height = 5,
+  dpi = 600,
+  bg = "white"
 )
